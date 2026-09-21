@@ -521,31 +521,63 @@ async function buscarIPCA(){
   if(isFinite(v)&&v>0) S.cfg.inflacao=Math.round(v*100)/100;
 }
 
-async function buscarCotacoes(){
-  const fiis=S.ativos.filter(a=>a.tipo==="fii").map(a=>a.id).join(",");
-  const r=await fetch(`https://brapi.dev/api/quote/${fiis}?token=${encodeURIComponent(S.cfg.token)}`);
-  if(r.status===401||r.status===403) throw new Error("Token da brapi inválido ou expirado.");
-  if(r.status===429) throw new Error("Limite da brapi atingido. Tente mais tarde.");
-  if(!r.ok) throw new Error("brapi indisponível agora.");
-  const j=await r.json();
+function erroBrapi(status,corpo){
+  const msg=(corpo&&(corpo.message||corpo.error))||"";
+  if(status===401||status===403) return "Token da brapi inválido ou ausente.";
+  if(status===402) return "Limite mensal da brapi excedido (15.000 no plano grátis).";
+  if(status===404) return "Ticker não encontrado na brapi"+(msg?": "+msg:".");
+  if(status===400) return "Requisição recusada pela brapi"+(msg?": "+msg:".");
+  return `brapi respondeu ${status}${msg?" — "+msg:""}.`;
+}
+
+async function pedirBrapi(lista){
+  const r=await fetch(`https://brapi.dev/api/quote/${lista}`,
+    {headers:{Authorization:`Bearer ${S.cfg.token}`}});
+  let corpo=null;
+  try{ corpo=await r.json(); }catch(e){}
+  if(!r.ok){ const e=new Error(erroBrapi(r.status,corpo)); e.status=r.status; throw e; }
+  return corpo;
+}
+
+function aplicar(j){
   let n=0;
-  (j.results||[]).forEach(q=>{
+  (j&&j.results||[]).forEach(q=>{
     const a=S.ativos.find(x=>x.id===q.symbol);
     const p=+q.regularMarketPrice;
     if(a&&isFinite(p)&&p>0){ a.preco=Math.round(p*100)/100; n++; }
   });
-  if(!n) throw new Error("A brapi não devolveu nenhuma cotação.");
   return n;
+}
+
+async function buscarCotacoes(){
+  const ids=S.ativos.filter(a=>a.tipo==="fii").map(a=>a.id);
+  try{
+    const n=aplicar(await pedirBrapi(ids.join(",")));
+    if(n) return {n,falhas:[]};
+    throw new Error("A brapi não devolveu nenhuma cotação.");
+  }catch(e){
+    // token ou cota estourada derrubam tudo — não adianta insistir ticker a ticker
+    if(e.status===401||e.status===403||e.status===402) throw e;
+    let n=0; const falhas=[];
+    for(const id of ids){
+      try{ n+=aplicar(await pedirBrapi(id)); }
+      catch(err){ falhas.push(id); }
+    }
+    if(!n) throw e;
+    return {n,falhas};
+  }
 }
 
 async function atualizar(){
   if(!S.cfg.token){ syncStatus("Cole seu token da brapi em Ajustes primeiro.",true); return; }
   $bSync.disabled=true; syncStatus("Buscando…");
   try{
-    const n=await buscarCotacoes();
+    const {n,falhas}=await buscarCotacoes();
     try{ await buscarIPCA(); }catch(e){ /* IPCA é opcional */ }
     S.cfg.syncAt=Date.now(); salvar(); render();
-    syncStatus(`${n} cotações atualizadas agora há pouco.`);
+    syncStatus(falhas.length
+      ? `${n} cotações atualizadas. Sem resposta para ${falhas.join(", ")} — ajuste na mão.`
+      : `${n} cotações atualizadas agora há pouco.`, falhas.length>0);
   }catch(e){
     syncStatus(e.message||"Não foi possível atualizar.",true);
   }finally{ $bSync.disabled=false; }
