@@ -120,11 +120,36 @@ details summary{cursor:pointer;font-size:13px;color:var(--ink-soft);padding:12px
 .sync button{width:auto;padding:7px 13px;font-size:13px;border-radius:7px}
 .sync button[disabled]{opacity:.5;cursor:default}
 .sync-s.err{color:var(--alerta)}
+.gate{max-width:420px;margin:0 auto;padding:28px 16px}
+.gate h1{margin-bottom:6px}
+.gate p.sub{font-size:14px;color:var(--ink-soft);margin-bottom:20px}
+.gate .card{padding:18px 16px}
+.gate button{margin-top:6px}
+.gate .msg{font-size:13px;margin-top:12px;color:var(--ink-soft)}
+.gate .msg.err{color:var(--alerta)}
+.conta{display:flex;justify-content:space-between;align-items:center;gap:10px;
+  font-size:12px;color:var(--ink-soft);padding:14px 2px 0;border-top:1px solid var(--line);margin-top:6px}
+.conta button{width:auto;padding:5px 11px;font-size:12px}
+.hidden{display:none!important}
+.nuvem{font-size:11px;color:var(--ink-soft);white-space:nowrap}
 @media (max-width:380px){ .meta-val{font-size:32px} .grid2{grid-template-columns:1fr} }
 </style>
 </head>
 <body>
-<div class="wrap">
+<div class="gate hidden" id="gate">
+  <h1>Carteira 2040</h1>
+  <p class="sub">Entre com seu e-mail. Você recebe um link de acesso — não tem senha pra esquecer.</p>
+  <div class="card">
+    <form id="fLogin">
+      <label for="gEmail">E-mail</label>
+      <input type="email" id="gEmail" required autocomplete="email" placeholder="voce@email.com">
+      <button type="submit" id="gBtn">Enviar link de acesso</button>
+    </form>
+    <div class="msg" id="gMsg"></div>
+  </div>
+</div>
+
+<div class="wrap hidden" id="app">
 
 <div class="head">
   <h1>Carteira 2040</h1>
@@ -241,12 +266,32 @@ details summary{cursor:pointer;font-size:13px;color:var(--ink-soft);padding:12px
       </form>
     </details>
   </div>
-  <p class="note">Tudo fica salvo só neste navegador. Baixe o backup de vez em quando.</p>
+  <p class="note">Seus dados ficam na sua conta, sincronizados entre aparelhos. O backup em JSON continua valendo como segunda rede.</p>
+  <div class="conta">
+    <span id="contaEmail"></span>
+    <span class="nuvem" id="nuvem"></span>
+    <button type="button" class="ghost" id="bSair">Sair</button>
+  </div>
 </section>
 
 </div>
 
-<script>
+<script type="module">
+import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm";
+
+/* ==== PREENCHA COM OS DADOS DO SEU PROJETO ====
+   Settings → API. A anon key é pública por design: quem protege os
+   dados é a Row Level Security, não o segredo dela.
+   Deixe as duas em branco para rodar só no navegador, sem login.      */
+const SUPABASE_URL  = "";
+const SUPABASE_ANON = "";
+/* Nome da Edge Function de cotações. Em branco = cada um usa o
+   próprio token da brapi, colado em Ajustes.                          */
+const FN_COTACOES   = "cotacoes";
+
+const sb = (SUPABASE_URL && SUPABASE_ANON) ? createClient(SUPABASE_URL, SUPABASE_ANON) : null;
+let user = null;
+
 const BRL=v=>"R$ "+v.toLocaleString("pt-BR",{minimumFractionDigits:0,maximumFractionDigits:0});
 const BRL2=v=>"R$ "+v.toLocaleString("pt-BR",{minimumFractionDigits:2,maximumFractionDigits:2});
 const VENC=new Date(2040,7,15);
@@ -269,24 +314,41 @@ const BASE={
 
 let S=carregar();
 
-function carregar(){
-  try{
-    const raw=localStorage.getItem("carteira2040");
-    if(!raw) return structuredClone(BASE);
-    const s=JSON.parse(raw);
-    const base=structuredClone(BASE);
-    base.ativos.forEach(a=>{
-      const o=(s.ativos||[]).find(x=>x.id===a.id);
-      if(o){a.preco=+o.preco||a.preco;a.div=+o.div||a.div;a.alvo=o.alvo!=null?+o.alvo:a.alvo;}
-    });
-    base.lanc=Array.isArray(s.lanc)?s.lanc:[];
-    base.cfg=Object.assign(base.cfg,s.cfg||{});
-    return base;
-  }catch(e){ return structuredClone(BASE); }
+function normalizar(s){
+  const base=structuredClone(BASE);
+  if(!s||typeof s!=="object") return base;
+  base.ativos.forEach(a=>{
+    const o=(s.ativos||[]).find(x=>x.id===a.id);
+    if(o){a.preco=+o.preco||a.preco;a.div=+o.div||a.div;a.alvo=o.alvo!=null?+o.alvo:a.alvo;}
+  });
+  base.lanc=Array.isArray(s.lanc)?s.lanc:[];
+  base.cfg=Object.assign(base.cfg,s.cfg||{});
+  return base;
 }
+function carregar(){
+  try{ return normalizar(JSON.parse(localStorage.getItem("carteira2040"))); }
+  catch(e){ return structuredClone(BASE); }
+}
+let tmrNuvem=null;
 function salvar(){
   try{ localStorage.setItem("carteira2040",JSON.stringify(S)); }
-  catch(e){ /* navegador sem armazenamento — os dados valem só nesta sessão */ }
+  catch(e){ /* navegador sem armazenamento — vale só nesta sessão */ }
+  if(sb&&user){
+    nuvemStatus("salvando…");
+    clearTimeout(tmrNuvem);
+    tmrNuvem=setTimeout(empurrarNuvem,800);
+  }
+}
+async function empurrarNuvem(){
+  if(!sb||!user) return;
+  const {error}=await sb.from("carteiras")
+    .upsert({user_id:user.id,dados:S},{onConflict:"user_id"});
+  nuvemStatus(error?"erro ao salvar na nuvem":"salvo na nuvem",!!error);
+}
+function nuvemStatus(t,erro){
+  const el=document.getElementById("nuvem");
+  if(!el) return;
+  el.textContent=t; el.style.color=erro?"var(--alerta)":"";
 }
 
 function pos(){
@@ -505,7 +567,7 @@ const $sync=document.getElementById("syncS"), $bSync=document.getElementById("bS
 function syncStatus(msg,erro){
   if(msg){ $sync.textContent=msg; $sync.classList.toggle("err",!!erro); return; }
   $sync.classList.remove("err");
-  if(!S.cfg.token){ $sync.textContent="Cole seu token da brapi em Ajustes para atualizar sozinho."; return; }
+  if(!(sb&&user&&FN_COTACOES)&&!S.cfg.token){ $sync.textContent="Cole seu token da brapi em Ajustes para atualizar sozinho."; return; }
   if(!S.cfg.syncAt){ $sync.textContent="Cotações nunca atualizadas."; return; }
   const h=(Date.now()-S.cfg.syncAt)/36e5;
   const q=h<1?"agora há pouco":h<24?`há ${Math.round(h)}h`:
@@ -549,8 +611,22 @@ function aplicar(j){
   return n;
 }
 
+async function viaFuncao(ids){
+  const {data,error}=await sb.functions.invoke(FN_COTACOES,{body:{tickers:ids}});
+  if(error) throw new Error("Função de cotações indisponível.");
+  if(data&&data.error) throw new Error(data.error);
+  let n=0;
+  Object.entries(data&&data.precos||{}).forEach(([id,p])=>{
+    const a=S.ativos.find(x=>x.id===id);
+    if(a&&isFinite(+p)&&+p>0){ a.preco=+p; n++; }
+  });
+  if(!n) throw new Error("Nenhuma cotação devolvida.");
+  return {n,falhas:(data&&data.falhas)||[]};
+}
+
 async function buscarCotacoes(){
   const ids=S.ativos.filter(a=>a.tipo==="fii").map(a=>a.id);
+  if(sb&&user&&FN_COTACOES) return viaFuncao(ids);
   try{
     const n=aplicar(await pedirBrapi(ids.join(",")));
     if(n) return {n,falhas:[]};
@@ -569,7 +645,8 @@ async function buscarCotacoes(){
 }
 
 async function atualizar(){
-  if(!S.cfg.token){ syncStatus("Cole seu token da brapi em Ajustes primeiro.",true); return; }
+  const viaFn=!!(sb&&user&&FN_COTACOES);
+  if(!viaFn&&!S.cfg.token){ syncStatus("Cole seu token da brapi em Ajustes primeiro.",true); return; }
   $bSync.disabled=true; syncStatus("Buscando…");
   try{
     const {n,falhas}=await buscarCotacoes();
@@ -584,9 +661,66 @@ async function atualizar(){
 }
 $bSync.addEventListener("click",atualizar);
 
-render();
-// busca sozinho se a última atualização tem mais de 6 horas
-if(S.cfg.token && (!S.cfg.syncAt || Date.now()-S.cfg.syncAt>6*36e5)) atualizar();
+// ---- login e sincronização ----
+const $gate=document.getElementById("gate"), $app=document.getElementById("app"),
+      $gMsg=document.getElementById("gMsg"), $gBtn=document.getElementById("gBtn");
+
+function tela(qual){
+  $gate.classList.toggle("hidden",qual!=="login");
+  $app.classList.toggle("hidden",qual!=="app");
+}
+function gMsg(t,erro){ $gMsg.textContent=t||""; $gMsg.classList.toggle("err",!!erro); }
+
+document.getElementById("fLogin").addEventListener("submit",async e=>{
+  e.preventDefault();
+  const email=document.getElementById("gEmail").value.trim();
+  if(!email||!sb) return;
+  $gBtn.disabled=true; gMsg("Enviando…");
+  const {error}=await sb.auth.signInWithOtp({email,
+    options:{emailRedirectTo:window.location.href.split("#")[0]}});
+  $gBtn.disabled=false;
+  gMsg(error?(error.message||"Não foi possível enviar o link.")
+            :"Link enviado. Abra o e-mail neste mesmo aparelho.",!!error);
+});
+
+document.getElementById("bSair").addEventListener("click",async()=>{
+  if(sb) await sb.auth.signOut();
+});
+
+async function puxarNuvem(){
+  nuvemStatus("carregando…");
+  const {data,error}=await sb.from("carteiras")
+    .select("dados").eq("user_id",user.id).maybeSingle();
+  if(error){ nuvemStatus("sem conexão — usando cópia local",true); return; }
+  if(data&&data.dados&&Object.keys(data.dados).length){
+    S=normalizar(data.dados);
+    try{ localStorage.setItem("carteira2040",JSON.stringify(S)); }catch(e){}
+    nuvemStatus("sincronizado");
+  }else{
+    await empurrarNuvem();   // primeira vez: sobe o que existe local
+  }
+}
+
+async function aplicarSessao(session){
+  user=session?.user||null;
+  if(!user){ tela("login"); return; }
+  document.getElementById("contaEmail").textContent=user.email;
+  await puxarNuvem();
+  tela("app"); render();
+  if(S.cfg.syncAt==null||Date.now()-S.cfg.syncAt>6*36e5) atualizar();
+}
+
+(async function boot(){
+  if(!sb){                       // modo local, sem projeto configurado
+    document.querySelector(".conta").style.display="none";
+    tela("app"); render();
+    if(S.cfg.token&&(!S.cfg.syncAt||Date.now()-S.cfg.syncAt>6*36e5)) atualizar();
+    return;
+  }
+  sb.auth.onAuthStateChange((_e,s)=>aplicarSessao(s));
+  const {data:{session}}=await sb.auth.getSession();
+  await aplicarSessao(session);
+})();
 </script>
 </body>
 </html>
